@@ -9,59 +9,87 @@ import keyboard
 import pyperclip
 import pystray
 from PIL import Image, ImageDraw
-from openai import OpenAI  # Updated usage per OpenAI's example
+from openai import OpenAI
+from colorama import Fore, Style, init
+
+# Initialize colorama
+init(autoreset=True)
 
 # ================================
 # Configuration and Global Variables
 # ================================
+HOTKEY = "F9"             # Remappable hotkey (change as needed)
+SAMPLE_RATE = 44100       # in Hz
+CHANNELS = 1              # mono recording
 
-# Remappable hotkey – change this string to your preferred key (e.g. "F9", "ctrl+shift+p", etc.)
-HOTKEY = "F9"
+recording = False         # True while recording
+recorded_frames = []      # List to store audio chunks
+stream = None             # The active InputStream
 
-# Audio recording settings
-SAMPLE_RATE = 44100  # in Hz
-CHANNELS = 1         # mono recording
+# Variables for adaptive stop
+stop_requested = False    # Set to True when hotkey is released
+stop_request_time = None  # Time when stop was requested
+silence_start = None      # Time when silence was first detected
 
-# Global flags and data storage
-recording = False
-recorded_frames = []  # List to store chunks of audio
-stream = None         # Will hold the active InputStream
+# Silence detection parameters
+SILENCE_THRESHOLD = 0.01   # RMS value below which is considered silence
+MIN_SILENCE_DURATION = 0.5  # Seconds of continuous silence required
+MAX_WAIT_AFTER_STOP_REQUEST = 2.0  # Maximum seconds to wait after release
 
-# Output folder for recordings and transcriptions
 OUTPUT_FOLDER = "recordings"
 if not os.path.exists(OUTPUT_FOLDER):
     os.makedirs(OUTPUT_FOLDER)
 
-# Initialize the OpenAI client (make sure OPENAI_API_KEY is set in your environment)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY_WORK"))  # This automatically uses the OPENAI_API_KEY environment variable
+# Initialize OpenAI client (ensure OPENAI_API_KEY is set in your environment)
+client = OpenAI()
 
 # ================================
 # Audio Recording Functions
 # ================================
-
 def audio_callback(indata, frames, time_info, status):
-    """Callback function for sounddevice InputStream."""
+    """Callback for sounddevice InputStream."""
+    global silence_start, stop_requested, stop_request_time
     if status:
-        print(f"Recording status: {status}")
+        print(Fore.RED + f"[Status] {status}")
     recorded_frames.append(indata.copy())
 
+    if stop_requested:
+        current_time = time.time()
+        rms = np.sqrt(np.mean(indata**2))
+        # Check if current block is silent.
+        if rms < SILENCE_THRESHOLD:
+            if silence_start is None:
+                silence_start = current_time
+            elif current_time - silence_start >= MIN_SILENCE_DURATION:
+                print(Fore.GREEN + "Silence detected for sufficient duration. Stopping recording.")
+                threading.Thread(target=stop_recording, daemon=True).start()
+        else:
+            silence_start = None
+        # If maximum waiting time elapsed, force stop.
+        if stop_request_time is not None and (current_time - stop_request_time) >= MAX_WAIT_AFTER_STOP_REQUEST:
+            print(Fore.RED + "Maximum wait time reached. Stopping recording.")
+            threading.Thread(target=stop_recording, daemon=True).start()
+
 def start_recording():
-    """Starts the audio recording."""
-    global recording, recorded_frames, stream
+    """Starts recording audio."""
+    global recording, recorded_frames, stream, stop_requested, silence_start, stop_request_time
     if recording:
-        return  # Already recording, do nothing
-    print("Starting recording...")
+        return
+    print(Fore.GREEN + "Starting recording...")
     recording = True
+    stop_requested = False
+    silence_start = None
+    stop_request_time = None
     recorded_frames = []
     stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, callback=audio_callback)
     stream.start()
 
 def stop_recording():
-    """Stops the audio recording and processes the audio."""
+    """Stops recording and processes the audio."""
     global recording, stream
     if not recording:
-        return  # Not recording, nothing to stop
-    print("Stopping recording...")
+        return
+    print(Fore.MAGENTA + "Stopping recording...")
     recording = False
     stream.stop()
     stream.close()
@@ -70,73 +98,68 @@ def stop_recording():
 def process_recording():
     """Saves the recorded audio to a WAV file and initiates transcription."""
     if not recorded_frames:
-        print("No audio recorded.")
+        print(Fore.RED + "No audio recorded.")
         return
-    # Combine all recorded chunks into a single array
     audio_data = np.concatenate(recorded_frames, axis=0)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     wav_filename = os.path.join(OUTPUT_FOLDER, f"recording_{timestamp}.wav")
     wavfile.write(wav_filename, SAMPLE_RATE, audio_data)
-    print(f"Saved recording to {wav_filename}")
+    print(Fore.CYAN + f"Saved recording to {wav_filename}")
     
-    # Transcribe the audio file using GPT-4o transcription API via OpenAI client
     transcription_text = transcribe_audio(wav_filename)
     if transcription_text:
         pyperclip.copy(transcription_text)
-        print("Transcription copied to clipboard.")
+        print(Fore.CYAN + "Transcription copied to clipboard.")
         txt_filename = os.path.join(OUTPUT_FOLDER, f"transcription_{timestamp}.txt")
         with open(txt_filename, "w", encoding="utf-8") as f:
             f.write(transcription_text)
-        print(f"Transcription saved to {txt_filename}")
+        print(Fore.GREEN + f"Transcription saved to {txt_filename}")
     else:
-        print("Transcription failed.")
+        print(Fore.RED + "Transcription failed.")
 
 # ================================
 # Transcription Function
 # ================================
-
 def transcribe_audio(filename):
     """
-    Sends the audio file to the GPT-4o transcription API using OpenAI's client 
-    and returns the transcription text.
+    Transcribes the given audio file using the GPT-4o transcription API.
+    Uses the OpenAI client as per the provided usage example.
     """
     try:
         with open(filename, "rb") as audio_file:
-            print("Sending audio to transcription API...")
+            print(Fore.BLUE + "Sending audio to transcription API...")
             transcription = client.audio.transcriptions.create(
                 model="gpt-4o-transcribe",
                 file=audio_file
             )
-            print("Transcription received.")
+            print(Fore.GREEN + "Transcription received.")
             return transcription.text
     except Exception as e:
-        print(f"Transcription error: {e}")
+        print(Fore.RED + f"Transcription error: {e}")
         return None
 
 # ================================
-# Hotkey Event Handlers
+# Hotkey Event Handlers with Adaptive Stop
 # ================================
-
 def on_hotkey_press(e):
-    """Called when the hotkey is pressed."""
-    # Start recording only if not already recording
+    """Starts recording when the hotkey is pressed."""
     if not recording:
         start_recording()
 
 def on_hotkey_release(e):
-    """Called when the hotkey is released."""
-    # Stop recording only if recording
+    """Flags stop request so the audio callback can flush remaining audio."""
+    global stop_requested, stop_request_time
     if recording:
-        stop_recording()
+        print(Fore.YELLOW + "Stop requested; initiating adaptive flush...")
+        stop_requested = True
+        stop_request_time = time.time()
 
-# Register global hotkey events.
 keyboard.on_press_key(HOTKEY, on_hotkey_press)
 keyboard.on_release_key(HOTKEY, on_hotkey_release)
 
 # ================================
 # System Tray Icon (Optional)
 # ================================
-
 def create_tray_image():
     """Creates a simple tray icon image."""
     width, height = 64, 64
@@ -151,19 +174,17 @@ def quit_app(icon, item):
     os._exit(0)
 
 def run_tray():
-    """Sets up and runs the system tray icon."""
+    """Runs the system tray icon."""
     image = create_tray_image()
     menu = pystray.Menu(pystray.MenuItem("Quit", quit_app))
     icon = pystray.Icon("PushToTalkRecorder", image, "Push-to-Talk Recorder", menu)
     icon.run()
 
-# Run the system tray icon in a separate thread so it doesn't block hotkey handling.
 tray_thread = threading.Thread(target=run_tray, daemon=True)
 tray_thread.start()
 
 # ================================
 # Main Loop
 # ================================
-
-print(f"Push-to-Talk Recorder running on Windows.\nHold '{HOTKEY}' to record audio. Transcriptions will be copied to the clipboard and saved in the '{OUTPUT_FOLDER}' folder.")
-keyboard.wait()  # Wait indefinitely for hotkey events
+print(Fore.LIGHTBLUE_EX + f"Push-to-Talk Recorder running on Windows.\nHold '{HOTKEY}' to record audio. Transcriptions will be copied to the clipboard and saved in '{OUTPUT_FOLDER}' folder.")
+keyboard.wait()
