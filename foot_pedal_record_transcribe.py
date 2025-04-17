@@ -18,30 +18,49 @@ init(autoreset=True)
 # ================================
 # Configuration and Global Variables
 # ================================
-HOTKEY = pynput_keyboard.Key.f9  # Remappable hotkey (change as needed)
-SAMPLE_RATE = 44100              # in Hz
-CHANNELS = 1                     # mono recording
+HOTKEY = pynput_keyboard.Key.f9      # Remappable hotkey (change as needed)
+SAMPLE_RATE = 44100                  # in Hz
+CHANNELS = 1                         # mono recording
 
-recording = False               # True while recording
-recorded_frames = []           # List to store audio chunks
-stream = None                  # The active InputStream
+recording = False                    # True while recording
+recorded_frames = []                 # List to store audio chunks
+stream = None                        # The active InputStream
 
 # Variables for adaptive stop
-stop_requested = False         # Set to True when hotkey is released
-stop_request_time = None      # Time when stop was requested
-silence_start = None          # Time when silence was first detected
+stop_requested = False
+stop_request_time = None
+silence_start = None
 
 # Silence detection parameters
-SILENCE_THRESHOLD = 0.01       # RMS value below which is considered silence
-MIN_SILENCE_DURATION = 0.5     # Seconds of continuous silence required
-MAX_WAIT_AFTER_STOP_REQUEST = 2.0  # Maximum seconds to wait after release
+SILENCE_THRESHOLD = 0.01
+MIN_SILENCE_DURATION = 0.5
+MAX_WAIT_AFTER_STOP_REQUEST = 2.0
 
-OUTPUT_FOLDER = "recordings"
-if not os.path.exists(OUTPUT_FOLDER):
-    os.makedirs(OUTPUT_FOLDER)
+# File locations
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_FOLDER = os.path.join(SCRIPT_DIR, "recordings")
+NOTES_FILE = os.path.join(SCRIPT_DIR, "notes.txt")   # <── NEW
 
-# Initialize OpenAI client (ensure OPENAI_API_KEY is set in your environment)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+# Initialize OpenAI client
 client = OpenAI()
+
+# ================================
+# Helper: append a note to notes.txt
+# ================================
+def append_note(text: str):
+    """Append '- hh:mm <text>' to notes.txt (single‑line)."""
+    hh_mm = datetime.datetime.now().strftime("%H:%M")
+    # Replace any internal line‑breaks with spaces to keep a one‑liner
+    single_line = " ".join(text.splitlines()).strip()
+    note_line = f"- {hh_mm} {single_line}\n"
+    try:
+        with open(NOTES_FILE, "a", encoding="utf-8") as f:
+            f.write(note_line)
+        print(Fore.GREEN + f"Note appended to {NOTES_FILE}")
+    except Exception as e:
+        print(Fore.RED + f"Failed to append note: {e}")
 
 # ================================
 # Audio Recording Functions
@@ -54,7 +73,7 @@ def audio_callback(indata, frames, time_info, status):
 
     if stop_requested:
         current_time = time.time()
-        rms = np.sqrt(np.mean(indata**2))
+        rms = np.sqrt(np.mean(indata ** 2))
         if rms < SILENCE_THRESHOLD:
             if silence_start is None:
                 silence_start = current_time
@@ -109,6 +128,10 @@ def process_recording():
         with open(txt_filename, "w", encoding="utf-8") as f:
             f.write(transcription_text)
         print(Fore.GREEN + f"Transcription saved to {txt_filename}")
+
+        # ---- NEW: add the note to notes.txt
+        append_note(transcription_text)
+
     else:
         print(Fore.RED + "Transcription failed.")
 
@@ -178,7 +201,10 @@ tray_thread.start()
 # ================================
 # Main Loop
 # ================================
-print(Fore.LIGHTBLUE_EX + f"Push-to-Talk Recorder running on Windows.\nHold 'F9' to record audio. Transcriptions will be copied to the clipboard and saved in '{OUTPUT_FOLDER}' folder.")
+print(Fore.LIGHTBLUE_EX +
+      f"Push-to-Talk Recorder running on Windows.\n"
+      f"Hold 'F9' to record audio. Transcriptions will be copied to the clipboard,\n"
+      f"saved in '{OUTPUT_FOLDER}', and appended to 'notes.txt'.")
 
 try:
     while True:
